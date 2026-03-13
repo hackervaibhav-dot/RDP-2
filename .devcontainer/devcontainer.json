@@ -1,0 +1,49 @@
+{
+  "name": "Duranto-RDP-120H-32GB",
+  "image": "mcr.microsoft.com/devcontainers/universal:2-linux",
+  "features": {
+    "ghcr.io/devcontainers/features/desktop-lite:1": {
+      "version": "latest",
+      "password": "RDP@120Hours",
+      "webPort": 6080,
+      "vncPort": 5901
+    }
+  },
+  "hostRequirements": {
+    "cpus": 8,
+    "memory": "32gb",
+    "storage": "256gb"
+  },
+  "forwardPorts": [3389, 5901, 6080, 5900, 5902, 3390],
+  "portsAttributes": {
+    "3389": {
+      "label": "Windows RDP",
+      "onAutoForward": "notify"
+    },
+    "6080": {
+      "label": "Web VNC",
+      "onAutoForward": "notify"
+    },
+    "5901": {
+      "label": "VNC Direct",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/setup-120h.sh",
+  "postStartCommand": "bash .devcontainer/no-sleep-120h.sh",
+  "customizations": {
+    "codespaces": {
+      "openFiles": ["README.md"]
+    },
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-vscode.powershell",
+        "github.copilot",
+        "ms-vscode.cpptools",
+        "ms-dotnettools.csharp",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  }
+}
