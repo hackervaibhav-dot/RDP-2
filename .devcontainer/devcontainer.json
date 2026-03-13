@@ -1,10 +1,10 @@
 {
-  "name": "Duranto-RDP-120H-32GB",
+  "name": "🚀 DURANTO RDP - 120 HOURS PERSISTENT",
   "image": "mcr.microsoft.com/devcontainers/universal:2-linux",
   "features": {
     "ghcr.io/devcontainers/features/desktop-lite:1": {
       "version": "latest",
-      "password": "RDP@120Hours",
+      "password": "a65%BAQ7tk1?d@M=",
       "webPort": 6080,
       "vncPort": 5901
     }
