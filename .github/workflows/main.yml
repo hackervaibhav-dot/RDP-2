@@ -1,0 +1,228 @@
+name: 🚀 DURANTO RDP - 120 HOURS PERSISTENT
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_hours:
+        description: '⏱️ Session Duration (hours)'
+        required: true
+        default: '120'
+        type: choice
+        options:
+          - 24
+          - 48
+          - 72
+          - 96
+          - 120
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 7200
+
+    steps:
+      - name: Configure Core RDP Settings
+        shell: pwsh
+        run: |
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                           -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "SecurityLayer" -Value 0 -Force
+
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+         
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Secure Password
+        shell: pwsh
+        run: |
+          # Function to generate secure password
+          function New-SecurePassword {
+              param([int]$Length = 16)
+              
+              $charSets = @{
+                  Upper   = [char[]](65..90)      # A-Z
+                  Lower   = [char[]](97..122)     # a-z
+                  Number  = [char[]](48..57)      # 0-9
+                  Special = [char[]](33,35,36,37,38,42,43,45,61,63,64,94,95) # Special characters
+              }
+              
+              $passwordChars = @()
+              
+              # Ensure at least one character from each set
+              $passwordChars += $charSets.Upper | Get-Random -Count 4
+              $passwordChars += $charSets.Lower | Get-Random -Count 4
+              $passwordChars += $charSets.Number | Get-Random -Count 4
+              $passwordChars += $charSets.Special | Get-Random -Count 4
+              
+              # Shuffle the characters
+              $password = -join ($passwordChars | Sort-Object { Get-Random })
+              return $password
+          }
+
+          # Generate secure password
+          $password = New-SecurePassword
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Create user
+          try {
+              New-LocalUser -Name "RDPUser" -Password $securePass -AccountNeverExpires -ErrorAction Stop
+              Add-LocalGroupMember -Group "Administrators" -Member "RDPUser" -ErrorAction Stop
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser" -ErrorAction Stop
+              
+              Write-Host "User created successfully"
+              echo "RDP_USER=RDPUser" >> $env:GITHUB_ENV
+              echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          }
+          catch {
+              Write-Error "User creation failed: $($_.Exception.Message)"
+              exit 1
+          }
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+         
+          try {
+              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -ErrorAction Stop
+              Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait -NoNewWindow
+              Start-Sleep -Seconds 10  # Wait for installation to complete
+              Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+              Write-Host "Tailscale installed successfully"
+          }
+          catch {
+              Write-Error "Tailscale installation failed: $($_.Exception.Message)"
+              exit 1
+          }
+
+      - name: Establish Tailscale Connection
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          if (-not $env:TAILSCALE_AUTH_KEY) {
+              Write-Error "Tailscale auth key not found in secrets"
+              exit 1
+          }
+          
+          # Wait for Tailscale service to be ready
+          $serviceReady = $false
+          $retries = 0
+          while (-not $serviceReady -and $retries -lt 10) {
+              try {
+                  $service = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+                  if ($service -and $service.Status -eq "Running") {
+                      $serviceReady = $true
+                      Write-Host "Tailscale service is running"
+                  } else {
+                      Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+                      Start-Sleep -Seconds 5
+                      $retries++
+                  }
+              }
+              catch {
+                  Start-Sleep -Seconds 5
+                  $retries++
+              }
+          }
+          
+          if (-not $serviceReady) {
+              Write-Error "Tailscale service not ready after $retries attempts"
+              exit 1
+          }
+          
+          # Bring up Tailscale with the provided auth key
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID --accept-routes
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 15) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>$null
+              if (-not $tsIP) {
+                  Write-Host "Waiting for Tailscale IP... ($retries/15)"
+                  Start-Sleep -Seconds 5
+                  $retries++
+              }
+          }
+         
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned after $retries attempts. Exiting."
+              exit 1
+          }
+          
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $tsIP"
+
+      - name: Verify RDP Accessibility
+        shell: pwsh
+        run: |
+          Write-Host "Testing RDP connectivity to Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet
+          if (-not $testResult) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              Write-Host "Checking local RDP status..."
+              Get-Service TermService | Format-Table Name, Status
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Display Connection Information
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "=== RDP ACCESS INFORMATION ===" -ForegroundColor Green
+          Write-Host "Tailscale Address: $env:TAILSCALE_IP" -ForegroundColor Yellow
+          Write-Host "Username: $env:RDP_USER" -ForegroundColor Yellow
+          Write-Host "Password: $env:RDP_PASSWORD" -ForegroundColor Yellow
+          Write-Host "Port: 3389" -ForegroundColor Yellow
+          Write-Host "==============================" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "This RDP session will be active for 6 hours maximum"
+          Write-Host "To connect from another Tailscale device, use the above credentials"
+          Write-Host ""
+
+      - name: Maintain Connection
+        shell: pwsh
+        run: |
+          Write-Host "Maintaining RDP connection..."
+          Write-Host "Session active. Press Ctrl+C in GitHub Actions to stop."
+          
+          # Keep runner active with periodic status updates
+          $startTime = Get-Date
+          $timeoutMinutes = 7200  # Slightly less than workflow timeout
+          
+          while ($true) {
+              $elapsed = (Get-Date) - $startTime
+              $remaining = $timeoutMinutes - $elapsed.TotalMinutes
+              
+              if ($remaining -le 0) {
+                  Write-Host "Timeout reached. Stopping RDP session."
+                  break
+              }
+              
+              Write-Host "RDP session active - Time remaining: $([math]::Round($remaining)) minutes"
+              
+              # Check if Tailscale is still connected
+              $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+              if (-not $tsStatus -or $tsStatus.BackendState -ne "Running") {
+                  Write-Error "Tailscale connection lost. Exiting."
+                  exit 1
+              }
+              
+              Start-Sleep -Seconds 300  # Check every minute
+          }
+          
